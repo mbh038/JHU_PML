@@ -1,0 +1,167 @@
+---
+title: "JHU_PML Project"
+author: "mbh038"
+date: "August 19, 2015"
+output: html_document
+---
+
+```{r read in the data,cache=TRUE}
+
+# download training data if not yet already done so
+if(!file.exists("./data/training.csv")){
+        fileURL<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        download.file(fileURL,destfile="./data/training.csv")
+        #include date of download
+        datedownloadedtraining<-date()
+        datedownloadedtraining
+        
+}
+
+# download testing data if not yet already done so
+if(!file.exists("./data/testing.csv")){
+        fileURL<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        download.file(fileURL,destfile="./data/testing.csv")
+        #include date of download
+        datedownloadedtesting<-date()
+        datedownloadedtesting
+        
+} 
+
+# read csv file into dataframe
+training<-read.csv("./data/training.csv")
+testing<-read.csv("./data/testing.csv")
+
+```
+
+```{r inspect the data}
+str(training)
+str(testing)
+```
+```{r inspect the data: summary}
+summary(training)
+summary(testing)
+```
+We remove all the logical variables from both training and testing sets, since they all have value NA for all 20 observations in the test set.
+
+```{r first clean up}
+library(dplyr)
+testdf<-testing[,sapply(testing,is.factor)|sapply(testing,is.integer)
+                |sapply(testing,is.numeric)]
+traindf<-select(training,which(colnames(training) %in% names(testdf)))
+traindf$classe<-training$classe
+```
+
+## Search for zero covariates
+
+```{r ,dependson="dummyVar"}
+library(caret)
+nsv <- nearZeroVar(traindf,saveMetrics=TRUE)
+nsv
+```
+On this basis, we remove the new_window column, which shows little variation in the training set,and in fact has no variation at all in the testing set. 
+
+```{r}
+traindf$new_window<-NULL
+testdf$new_window<-NULL
+```
+## Standardise numerical columns
+
+```{r preprocess,cache=TRUE}
+preObj <- preProcess(traindf[,6:58],method=c("center","scale"))
+traindf <- data.frame(traindf[,1:5],predict(preObj,traindf[,6:58]))
+testdf <- data.frame(testdf[,1:5],predict(preObj,testdf[,6:58]))
+traindf$classe<-training$classe
+testdf$id<-testing$id
+```
+
+## Make training and testing set within training set for cross validation purposes
+
+We split our training set into a trainingcv and testingcv part, for cross-validation purposes. We will train a predictive model on the tainingcv part, and assess its accuracy in predicting the classe variable in the testingcv part.
+
+```{r}
+InTrain<-createDataPartition(y=traindf$classe,p=0.7,list=FALSE)
+trainingcv<-traindf[InTrain,]
+testingcv<-traindf[-InTrain,]
+```
+
+
+## Random Forest model
+Here we train a randomn forest model on the training part of our larger training set and use it to predict the classe variable in the testing part.
+
+```{r}
+library(randomForest)
+set.seed(1)
+classeForest = randomForest(classe ~ ., data=trainingcv[,6:ncol(trainingcv)] )
+
+PredictForest = predict(classeForest, newdata = testingcv[,6:ncol(testingcv)])
+ctClasserf<-table(testingcv$classe, PredictForest)
+ctClasserf
+
+#accuracy on test set
+sum(diag(ctClasserf))/sum(ctClasserf)
+```
+
+This is very high accuracy, so we have confidence in our model, but overfitting may be occurring, so we attempt now to assess the relative improtance of the predictors, and reduce them in nuimber, if possible, using only those that have high predictive value.
+
+## Assessing importance of variables
+
+We present two ways of assesing the relative importance of the covariates to the predictive power of the model
+
+### - by number times used to initiate a split: more => more important
+Firstly, we count the number of times each variable is used to initiate a split - the more times a variable is used, the more imprtant it is.
+
+```{r}
+vu = varUsed(classeForest, count=TRUE)
+vusorted = sort(vu, decreasing = FALSE, index.return = TRUE)
+dotchart(vusorted$x, names(classeForest$forest$xlevels[vusorted$ix]))
+```
+### - by average reduction in impurity
+
+Here we measure the importance of a variable by averaging the reduction in impurity of each leaf, taking the average over all the times that variable is selected for splitting in all of the trees in the forest. 
+
+```{r}
+varImpPlot(classeForest)
+```
+Both methods agree on the nine most significant predictors. In order to guard against overfitting, we train the random forest model again on the training subset of the full training data, using only these predictors, and again measure its accuracy on the testing subset for cross validation:
+
+```{r}
+library(randomForest)
+set.seed(1)
+classeForest = randomForest(classe ~ num_window+yaw_belt+pitch_belt+roll_belt+magnet_dumbbell_x+magnet_dumbbell_y+magnet_dumbbell_z+pitch_forearm+roll_forearm, data=trainingcv )
+
+PredictForest = predict(classeForest, newdata = testingcv)
+ctClasserf<-table(testingcv$classe, PredictForest)
+ctClasserf
+
+#accuracy on test set
+sum(diag(ctClasserf))/sum(ctClasserf)
+```
+This also achieves almost perfect accuracy, and we have more confidence that it will perform well on new data.
+
+### We repeat the two tests for relative importance of the predictors, but now on the restricted set:
+```{r}
+vu = varUsed(classeForest, count=TRUE)
+vusorted = sort(vu, decreasing = FALSE, index.return = TRUE)
+dotchart(vusorted$x, names(classeForest$forest$xlevels[vusorted$ix]))
+
+varImpPlot(classeForest)
+```
+
+## Now we make predictions on the out of sample test data
+```{r}
+PredictTest = predict(classeForest, newdata = testdf)
+PredictTest
+```
+
+## Write predictions as 20 single character text files, for submission.
+```{r}
+answers<-as.character(PredictTest)
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(answers)
+```
