@@ -1,0 +1,216 @@
+---
+title: "JHU_PML Project"
+author: "Michael Hunt"
+date: "August 19, 2015"
+output: html_document
+---
+
+## Clean the workspace
+rm(list=ls())
+
+## Download the data and read into R
+
+```{r read in the data,cache=TRUE}
+
+# download training data if not yet already done so
+if(!file.exists("./data/training.csv")){
+        fileURL<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        download.file(fileURL,destfile="./data/training.csv")
+        #include date of download
+        datedownloadedtraining<-date()
+        datedownloadedtraining
+        
+}
+
+# download testing data if not yet already done so
+if(!file.exists("./data/testing.csv")){
+        fileURL<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        download.file(fileURL,destfile="./data/testing.csv")
+        #include date of download
+        datedownloadedtesting<-date()
+        datedownloadedtesting
+        
+} 
+
+# read csv file into dataframe
+training<-read.csv("./data/training.csv")
+testing<-read.csv("./data/testing.csv")
+
+```
+## Inspection of the data
+
+```{r inspect the data,results="hide"}
+str(training)
+str(testing)
+summary(training)
+summary(testing)
+```
+## Fist clean-up of the data
+
+We remove all the logical variables from both training and testing sets, since they all have value NA for all 20 observations in the test set.
+
+```{r first clean up,message=FALSE}
+library(dplyr)
+testdf<-testing[,sapply(testing,is.factor)|sapply(testing,is.integer)
+                |sapply(testing,is.numeric)]
+traindf<-select(training,which(colnames(training) %in% names(testdf)))
+traindf$classe<-training$classe
+```
+
+## Search for zero variance covariates
+
+```{r ,dependson="dummyVar",message=FALSE}
+library(caret)
+nsv <- nearZeroVar(traindf,saveMetrics=TRUE)
+nsv
+```
+On this basis, we remove the new_window column, which shows little variation in the training set,and in fact has no variation at all in the testing set. 
+
+```{r}
+traindf$new_window<-NULL
+testdf$new_window<-NULL
+```
+## Standardise numerical columns
+
+Subtract mean from all numerical variables in the training set and divide by standard deviation
+We do this also for the test data, but using the mean and standard deviation of the _training_ data, not their own.
+
+```{r preprocess,cache=TRUE}
+preObj <- preProcess(traindf[,6:58],method=c("center","scale"))
+traindf <- data.frame(traindf[,1:5],predict(preObj,traindf[,6:58]))
+testdf <- data.frame(testdf[,1:5],predict(preObj,testdf[,6:58]))
+traindf$classe<-training$classe
+testdf$id<-testing$id
+```
+
+## Divide training set into training and testing sub-sets for cross-validation purposes
+
+We split our training set into a trainingcv and testingcv part, for cross-validation purposes. We will train a predictive model on the training-cv part, and assess its accuracy in predicting the classe variable in the testing-cv part.
+
+```{r}
+InTrain<-createDataPartition(y=traindf$classe,p=0.7,list=FALSE)
+trainingcv<-traindf[InTrain,]
+testingcv<-traindf[-InTrain,]
+```
+
+
+## Random Forest model
+Here we train a random forest model on the training sub-set of our larger training set and use it to predict the classe variable in the testing part.
+
+We use random forest since this is a classification problem, but do not use the train function from the caret package since this takes very much longer to compute on the author's machine.
+
+First, we use all the numerical variables as predictors.
+
+```{r message=FALSE}
+library(randomForest)
+set.seed(1)
+classeForest = randomForest(classe ~ ., data=trainingcv[,6:ncol(trainingcv)] )
+
+PredictForest = predict(classeForest, newdata = testingcv[,6:ncol(testingcv)])
+ctClasserf<-table(testingcv$classe, PredictForest)
+ctClasserf
+```
+## Accuracy of random forest model
+
+```{r}
+#accuracy on test set
+sum(diag(ctClasserf))/sum(ctClasserf)
+```
+
+This is extremely high accuracy, so we have tentative confidence in our model, but overfitting may be occurring and this process still takes several minutes, so we attempt now to assess the relative importance of the predictors, and reduce them in number, if possible, using only those that have high predictive value. This may result in a reduction in accuracy within the training data, but, despite that, an improvement in out of sample prediction accuracy.
+
+## Assessing importance of variables
+
+We present two ways of assesing the relative importance of the covariates to the predictive power of the model
+
+
+### by number of times used to initiate a split: more => more important
+Firstly, we count the number of times each variable is used to initiate a split - the more times a variable is used, the more important it is.
+
+```{r}
+vu = varUsed(classeForest, count=TRUE)
+vusorted = sort(vu, decreasing = FALSE, index.return = TRUE)
+#vusorted
+dotchart(vusorted$x, names(classeForest$forest$xlevels[vusorted$ix]))
+```
+
+### by average reduction in impurity
+Secondly,we measure the importance of a variable by averaging the reduction in impurity of each leaf brought about about by splitting on the variable, taking the average over all the times that variable is selected for splitting in all of the trees in the forest. The greater the reduction in impurity, the more important the variable. We use Gini as the measure of impurity)
+
+```{r}
+# varImp(classeForest)
+varImpPlot(classeForest)
+```
+
+Both methods agree on the nine most significant predictors. In order to guard against overfitting, we train the random forest model again on the training subset of the full training data, using only these predictors, and again measure its accuracy on the testing subset for cross-validation purposes:
+
+```{r message=FALSE}
+library(randomForest)
+set.seed(1)
+classeForest = randomForest(classe ~ num_window+yaw_belt+pitch_belt+roll_belt+magnet_dumbbell_x+magnet_dumbbell_y+magnet_dumbbell_z+pitch_forearm+roll_forearm, data=trainingcv )
+
+PredictForest = predict(classeForest, newdata = testingcv)
+ctClasserf<-table(testingcv$classe, PredictForest)
+ctClasserf
+
+# accuracy on test set
+accuracy<-sum(diag(ctClasserf))/sum(ctClasserf)
+accuracy
+```
+This also achieves almost perfect accuracy, and we now have more confidence that it will perform just as well on other out-of-sample data sets, with error rates comparable to what we have observed on our "testing" sub-set of the training data, this being 
+
+```{r error rate}
+# out-of-sample error rate prediction
+1-accuracy
+```
+Have concerns that num_window is in fact a proxy for what we are trying to predict, so let us leave this out and rerun the model:
+```{r message=FALSE}
+library(randomForest)
+set.seed(1)
+classeForest = randomForest(classe ~ yaw_belt+pitch_belt+roll_belt+magnet_dumbbell_x+magnet_dumbbell_y+magnet_dumbbell_z+pitch_forearm+roll_forearm, data=trainingcv )
+
+PredictForest = predict(classeForest, newdata = testingcv)
+ctClasserf<-table(testingcv$classe, PredictForest)
+ctClasserf
+
+# accuracy on test set
+accuracy<-sum(diag(ctClasserf))/sum(ctClasserf)
+accuracy
+```
+This also achieves almost perfect accuracy, and we now have more confidence that it will perform just as well on other out-of-sample data sets, with error rates comparable to what we have observed on our "testing" sub-set of the training data, this being 
+
+```{r error rate}
+# out-of-sample error rate prediction
+1-accuracy
+```
+
+### We repeat the two tests for relative importance of the predictors, but now on the restricted set:
+```{r}
+vu = varUsed(classeForest, count=TRUE)
+vusorted = sort(vu, decreasing = FALSE, index.return = TRUE)
+dotchart(vusorted$x, names(classeForest$forest$xlevels[vusorted$ix]))
+
+vImp<-varImp(classeForest,count=TRUE)
+varImpPlot(classeForest)
+```
+
+## Now we make predictions on the out of sample test data
+```{r}
+PredictTest = predict(classeForest, newdata = testdf)
+PredictTest
+```
+
+## Write predictions as 20 single character text files, for submission.
+```{r}
+answers<-as.character(PredictTest)
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(answers)
+```
+All 20 predictions are correct. Given this, it seems unnecessary to carry out more involved cross-validation procedures (eg n-fold, rfcv) than were used here.
+
